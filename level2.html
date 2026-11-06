@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Level 2: Feed the Note Monster</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #e0f7fa, #fff9c4);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow: hidden;
+        }
+        h1 { color: #006064; font-size: 2.5rem; margin-bottom: 5px; }
+        #instruction { font-size: 1.5rem; color: #004d40; font-weight: bold; margin-bottom: 20px; }
+        
+        /* 五線譜 Canvas */
+        #staffCanvas {
+            background-color: white;
+            border-radius: 15px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+        }
+
+        /* 遊戲舞台 */
+        #game-stage {
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            width: 800px;
+            margin-top: 20px;
+        }
+
+        /* 小怪獸 UI 樣式 */
+        #monster {
+            width: 180px;
+            height: 180px;
+            background-color: #ff4081;
+            border-radius: 50% 50% 40% 40%;
+            position: relative;
+            box-shadow: 0 8px 15px rgba(0,0,0,0.15);
+            transition: transform 0.2s;
+        }
+        #monster.bounce { transform: scale(1.2) translateY(-20px); }
+        #monster.tilt { transform: rotate(15deg); }
+        .eye {
+            width: 30px; height: 30px; background: white; border-radius: 50%;
+            position: absolute; top: 40px; display: flex; align-items: center; justify-content: center;
+        }
+        .eye-left { left: 40px; } .eye-right { right: 40px; }
+        .pupil { width: 12px; height: 12px; background: black; border-radius: 50%; }
+        #mouth {
+            width: 60px; height: 30px; background: #880e4f; border-radius: 0 0 30px 30px;
+            position: absolute; bottom: 40px; left: 60px; transition: height 0.2s;
+        }
+        #monster.open-mouth #mouth { height: 50px; }
+
+        /* 按鈕 */
+        #start-btn {
+            padding: 15px 40px; font-size: 1.3rem; font-weight: bold;
+            background-color: #00bcd4; color: white; border: none;
+            border-radius: 30px; cursor: pointer; box-shadow: 0 5px 10px rgba(0,0,0,0.2);
+        }
+        #start-btn:hover { background-color: #0097a7; }
+        
+        #detect-status { font-size: 1.2rem; color: #555; margin-top: 10px; font-weight: bold;}
+    </style>
+</head>
+<body>
+
+    <h1>Level 2: Feed the Note Monster!</h1>
+    <div id="instruction">Click START to activate AI mic and sing the note!</div>
+    
+    <canvas id="staffCanvas" width="600" height="200"></canvas>
+
+    <div id="game-stage">
+        <button id="start-btn" onclick="initAudio()">START MIC</button>
+        <div id="monster">
+            <div class="eye eye-left"><div class="pupil"></div></div>
+            <div class="eye eye-right"><div class="pupil"></div></div>
+            <div id="mouth"></div>
+        </div>
+    </div>
+    
+    <div id="detect-status">Pitch Detected: -- Hz (Waiting for mic...)</div>
+
+    <script>
+        // 1. 定義標準音高與頻率範圍 (包含特教包容度誤差 ±15Hz)
+        const NOTE_TARGETS = [
+            { name: 'Do', freq: 261.6, min: 246, max: 276, color: '#ff1744', yPos: 150 }, 
+            { name: 'Re', freq: 293.7, min: 277, max: 308, color: '#ffea00', yPos: 140 }, 
+            { name: 'Mi', freq: 329.6, min: 314, max: 345, color: '#2979ff', yPos: 130 }  
+        ];
+
+        let currentNoteIndex = 0;
+        let audioContext, analyser, dataArray;
+        let isPlaying = false;
+
+        const canvas = document.getElementById('staffCanvas');
+        const ctx = canvas.getContext('2d');
+        const monster = document.getElementById('monster');
+        const statusDiv = document.getElementById('detect-status');
+
+        // 繪製五線譜與糖果音符
+        function drawScene() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 畫五線譜五條線
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 5; i++) {
+                let y = 50 + i * 20;
+                ctx.beginPath();
+                ctx.moveTo(50, y);
+                ctx.lineTo(550, y);
+                ctx.stroke();
+            }
+
+            let target = NOTE_TARGETS[currentNoteIndex];
+
+            // 如果是 Do，額外畫一條一小段的下加一線
+            if (target.yPos === 150) {
+                ctx.strokeStyle = '#333';
+                ctx.beginPath();
+                ctx.moveTo(270, 150);
+                ctx.lineTo(330, 150);
+                ctx.stroke();
+            }
+
+            // 畫「音符糖果」
+            ctx.fillStyle = target.color;
+            ctx.beginPath();
+            ctx.arc(300, target.yPos, 10, 0, Math.PI * 2); 
+            ctx.fill();
+            
+            // 音符桿
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(310, target.yPos);
+            ctx.lineTo(310, target.yPos - 35);
+            ctx.stroke();
+
+            // 顯示全英文提示文字
+            document.getElementById('instruction').innerHTML = `Sing <span style="color:${target.color}; font-size:2rem;">${target.name}</span> to feed the monster!`;
+        }
+
+        // 2. 初始化網頁語音採樣 (Web Audio API)
+        async function initAudio() {
+            if (isPlaying) return;
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const source = audioContext.createMediaStreamSource(stream);
+                
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048; 
+                source.connect(analyser);
+                
+                dataArray = new Float32Array(analyser.fftSize);
+                isPlaying = true;
+                document.getElementById('start-btn').style.display = 'none';
+                
+                updatePitch(); // 啟動實時 AI 偵測迴圈
+            } catch (err) {
+                alert('Microphone access denied. Please check site permissions.');
+            }
+        }
+
+        // 3. AI 核心：基於自相關功能（Autocorrelation）的實時音高特徵提取演算法
+        function updatePitch() {
+            if (!isPlaying) return;
+            
+            analyser.getFloatTimeDomainData(dataArray);
+            let pitch = autoCorrelate(dataArray, audioContext.sampleRate);
+            
+            if (pitch !== -1) {
+                let roundedPitch = Math.round(pitch);
+                statusDiv.innerText = `Pitch Detected: ${roundedPitch} Hz`;
+                
+                let target = NOTE_TARGETS[currentNoteIndex];
+                
+                // 檢查偵測到的頻率是否落在當前音符的容寬範圍內
+                if (roundedPitch >= target.min && roundedPitch <= target.max) {
+                    triggerSuccess(); 
+                } else {
+                    // 去挫敗感機制：唱錯只讓怪獸歪頭暗示，不扣分或發出失敗音
+                    monster.classList.add('tilt');
+                    setTimeout(() => monster.classList.remove('tilt'), 500);
+                }
+            } else {
+                statusDiv.innerText = `Pitch Detected: -- Hz (Keep singing...)`;
+            }
+            
+            requestAnimationFrame(updatePitch); 
+        }
+
+        // 核心特徵提取：從時域音訊波形中提取基音頻率 (免雲端訓練的內嵌 AI 核心)
+        function autoCorrelate(buffer, sampleRate) {
+            let SIZE = buffer.length;
+            let rms = 0;
+
+            for (let i = 0; i < SIZE; i++) {
+                let val = buffer[i];
+                rms += val * val;
+            }
+            rms = Math.sqrt(rms / SIZE);
+            if (rms < 0.01) return -1; // 噪音過濾
+
+            let r1 = 0, r2 = SIZE - 1, thres = 0.2;
+            for (let i = 0; i < SIZE / 2; i++) {
+                if (Math.abs(buffer[i]) < thres) { r1 = i; break; }
+            }
+            for (let i = SIZE - 1; i >= SIZE / 2; i--) {
+                if (Math.abs(buffer[i]) < thres) { r2 = i; break; }
+            }
+
+            buffer = buffer.slice(r1, r2);
+            SIZE = buffer.length;
+
+            let c = new Float32Array(SIZE);
+            for (let i = 0; i < SIZE; i++) {
+                for (let j = 0; j < SIZE - i; j++) {
+                    c[i] = c[i] + buffer[j] * buffer[j + i];
+                }
+            }
+
+            let d = 0;
+            while (c[d] > c[d + 1]) d++;
+            let maxval = -1, maxpos = -1;
+            for (let i = d; i < SIZE; i++) {
+                if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
+            }
+            let T0 = maxpos;
+
+            let x1 = c[T0 - 1], x2 = c[T0], x3 = c[T0 + 1];
+            let a = (x1 + x3 - 2 * x2) / 2;
+            let b = (x3 - x1) / 2;
+            if (a) T0 = T0 - b / (2 * a);
+
+            return sampleRate / T0;
+        }
+
+        // 4. 成功反饋與音符切換邏輯
+        function triggerSuccess() {
+            isPlaying = false; 
+            monster.classList.add('bounce', 'open-mouth');
+            statusDiv.innerText = `🎯 MATCHED! Delicious!`;
+            
+            setTimeout(() => {
+                monster.classList.remove('bounce', 'open-mouth');
+                currentNoteIndex = (currentNoteIndex + 1) % NOTE_TARGETS.length;
+                drawScene();
+                isPlaying = true;
+                updatePitch();
+            }, 2000); 
+        }
+
+        // 啟動畫面繪製
+        drawScene();
+    </script>
+</body>
+</html>
+
